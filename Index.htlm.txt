@@ -1,0 +1,220 @@
+﻿<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quét Mã Vận Đơn - Đóng Gói</title>
+  <!-- Thư viện Quét Mã QR HTML5 -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Arial, sans-serif; }
+    body { background-color: #f4f6f9; padding: 15px; color: #333; }
+    .container { max-width: 500px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+    h2 { text-align: center; color: #1e3c72; margin-bottom: 15px; font-size: 20px; }
+    
+    .config-box { margin-bottom: 15px; }
+    .config-box label { font-size: 13px; font-weight: bold; color: #555; display: block; margin-bottom: 5px; }
+    .config-box input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
+
+    #reader { width: 100%; border-radius: 8px; overflow: hidden; background: #000; min-height: 250px; }
+    
+    .status-box { margin-top: 15px; padding: 12px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 15px; min-height: 48px; display: flex; align-items: center; justify-content: center; }
+    .status-waiting { background: #e9ecef; color: #495057; }
+    .status-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+    .status-duplicate { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+    .status-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+
+    .history-title { margin-top: 20px; font-size: 15px; font-weight: bold; color: #333; border-bottom: 2px solid #1e3c72; padding-bottom: 5px; }
+    .history-list { list-style: none; margin-top: 10px; max-height: 200px; overflow-y: auto; }
+    .history-item { background: #f8f9fa; border: 1px solid #e9ecef; padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
+    .badge-success { background: #28a745; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; }
+    .badge-duplicate { background: #ffc107; color: #333; padding: 2px 8px; border-radius: 12px; font-size: 11px; }
+
+    .controls { margin-top: 15px; display: flex; gap: 10px; }
+    .btn { flex: 1; padding: 10px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+    .btn-start { background: #28a745; color: white; }
+    .btn-stop { background: #dc3545; color: white; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h2>📷 Quét Mã Vận Đơn</h2>
+
+  <!-- Nhập Web App URL của Google Apps Script -->
+  <div class="config-box">
+    <label for="scriptUrl">Dán Web App URL Apps Script tại đây:</label>
+    <input type="text" id="scriptUrl" placeholder="https://script.google.com/macros/s/.../exec" onchange="saveUrl()">
+  </div>
+
+  <!-- Camera Container -->
+  <div id="reader"></div>
+
+  <!-- Nút điều khiển -->
+  <div class="controls">
+    <button class="btn btn-start" onclick="startScanner()">Mở Camera</button>
+    <button class="btn btn-stop" onclick="stopScanner()">Tắt Camera</button>
+  </div>
+
+  <!-- Trạng thái quét -->
+  <div id="status" class="status-box status-waiting">
+    Sẵn sàng quét mã...
+  </div>
+
+  <!-- Lịch sử quét trong phiên -->
+  <div class="history-title">📋 Lịch sử quét gần đây</div>
+  <ul id="history" class="history-list"></ul>
+</div>
+
+<script>
+  let html5QrCode;
+  let isProcessing = false;
+  let lastScannedCode = "";
+  let lastScannedTime = 0;
+
+  // Lấy URL lưu trữ sẵn trong browser (LocalStorage)
+  window.onload = function() {
+    const savedUrl = localStorage.getItem("apps_script_url");
+    if (savedUrl) {
+      document.getElementById("scriptUrl").value = savedUrl;
+    }
+  };
+
+  function saveUrl() {
+    const url = document.getElementById("scriptUrl").value.trim();
+    localStorage.setItem("apps_script_url", url);
+  }
+
+  // Tạo âm thanh tít khi quét thành công
+  function playBeep() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 1000;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      setTimeout(() => { osc.stop(); ctx.close(); }, 150);
+    } catch(e) {}
+  }
+
+  // Rung thiết bị
+  function triggerVibrate() {
+    if (navigator.vibrate) {
+      navigator.vibrate(200);
+    }
+  }
+
+  function startScanner() {
+    if (!html5QrCode) {
+      html5QrCode = new Html5Qrcode("reader");
+    }
+
+    const config = { 
+      fps: 10, 
+      qrbox: { width: 250, height: 150 },
+      aspectRatio: 1.0
+    };
+
+    // Ưu tiên sử dụng camera sau (facingMode: "environment")
+    html5QrCode.start(
+      { facingMode: "environment" }, 
+      config, 
+      onScanSuccess
+    ).catch(err => {
+      setStatus("Không mở được camera: " + err, "error");
+    });
+  }
+
+  function stopScanner() {
+    if (html5QrCode) {
+      html5QrCode.stop().then(() => {
+        setStatus("Đã tắt camera", "waiting");
+      }).catch(err => console.error(err));
+    }
+  }
+
+  function onScanSuccess(decodedText) {
+    const now = Date.now();
+    
+    // Chặn gửi trùng mã nếu vừa quét trong vòng 3 giây
+    if (decodedText === lastScannedCode && (now - lastScannedTime) < 3000) {
+      return;
+    }
+
+    if (isProcessing) return;
+
+    isProcessing = true;
+    lastScannedCode = decodedText;
+    lastScannedTime = now;
+
+    playBeep();
+    triggerVibrate();
+
+    setStatus(`Đang xử lý mã: ${decodedText}...`, "waiting");
+
+    sendToGoogleSheet(decodedText);
+  }
+
+  function sendToGoogleSheet(maVanDon) {
+    const scriptUrl = document.getElementById("scriptUrl").value.trim();
+
+    if (!scriptUrl) {
+      setStatus("Vui lòng dán Web App URL của Apps Script trước!", "error");
+      isProcessing = false;
+      return;
+    }
+
+    // Tự động gắn thêm tham số maVanDon
+    const url = `${scriptUrl}?maVanDon=${encodeURIComponent(maVanDon)}`;
+
+    fetch(url)
+      .then(response => response.json())
+      .then(data => {
+        if (data.success) {
+          setStatus(`🟢 Đã đóng gói: ${maVanDon}`, "success");
+          addHistory(data.maVanDon, data.thoiGian, "Đã đóng gói", "success");
+        } else if (data.duplicate) {
+          setStatus(`⚠️ ${data.message}: ${maVanDon}`, "duplicate");
+          addHistory(data.maVanDon, new Date().toLocaleTimeString(), "Trùng mã", "duplicate");
+        } else {
+          setStatus(`🔴 Lỗi: ${data.message}`, "error");
+        }
+      })
+      .catch(err => {
+        setStatus("🔴 Lỗi kết nối tới Apps Script!", "error");
+      })
+      .finally(() => {
+        // Mở lại khả năng nhận mã tiếp theo sau 1.5s
+        setTimeout(() => { isProcessing = false; }, 1500);
+      });
+  }
+
+  function setStatus(text, type) {
+    const statusDiv = document.getElementById("status");
+    statusDiv.className = `status-box status-${type}`;
+    statusDiv.innerText = text;
+  }
+
+  function addHistory(code, time, note, type) {
+    const historyList = document.getElementById("history");
+    const li = document.createElement("li");
+    li.className = "history-item";
+    
+    const badgeClass = type === "success" ? "badge-success" : "badge-duplicate";
+    
+    li.innerHTML = `
+      <span><strong>${code}</strong> <small>(${time})</small></span>
+      <span class="${badgeClass}">${note}</span>
+    `;
+    
+    historyList.insertBefore(li, historyList.firstChild);
+  }
+</script>
+
+</body>
+</html>This is EMU8086 version 4.08
+Repack for Windows 10
+November 25, 2015
